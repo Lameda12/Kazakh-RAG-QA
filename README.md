@@ -1,14 +1,3 @@
----
-license: mit
-title: Kazakh RAG QA
-sdk: gradio
-emoji: 🌍
-colorFrom: gray
-colorTo: green
-pinned: false
-short_description: Ask questions in Kazakh, get answers instantly
-sdk_version: 6.14.0
----
 # 🇰🇿 Kazakh RAG Question Answering
 
 A Retrieval-Augmented Generation (RAG) system for Kazakh-language QA.
