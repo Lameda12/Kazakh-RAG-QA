@@ -1,0 +1,9 @@
+sentence-transformers
+faiss-cpu
+datasets
+transformers
+gradio
+accelerate
+numpy
+tokenizers
+tiktoken
