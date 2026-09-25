@@ -1,9 +1,13 @@
 """End-to-end over tiny random models: exercises the real library APIs, not answer quality."""
 
 import importlib
+import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
+import faiss
+import numpy as np
 import pytest
 
 from kazrag.data import iter_corpus
@@ -106,3 +110,56 @@ def test_reader_clips_long_questions(tiny_models):
     long_question = " ".join(["Қазақстанның астанасы қай қала?"] * 60)
     [span] = reader.read(long_question, [next(iter_corpus()).content])
     assert span is not None
+
+
+def _no_model(*_args, **_kwargs):
+    raise AssertionError("the embedder should not be loaded")
+
+
+def test_reindex_with_new_factory_skips_encoding(tiny_models, tmp_path, monkeypatch):
+    spec = EmbedderSpec.for_model(tiny_models["embedder"], max_seq_length=128)
+    passages = list(iter_corpus())
+    build_index(passages, tmp_path, spec, factory="Flat", chunk_size=2, log=lambda _: None)
+    monkeypatch.setattr("kazrag.index.load_embedder", _no_model)
+    logs = []
+    build_index(passages, tmp_path, spec, factory="SQ8", log=logs.append)
+    assert any("already encoded" in m for m in logs)
+    assert json.loads((tmp_path / "meta.json").read_text())["faiss_factory"] == "SQ8"
+
+
+def test_legacy_progress_file_still_resumes(tiny_models, tmp_path, monkeypatch):
+    spec = EmbedderSpec.for_model(tiny_models["embedder"], max_seq_length=128)
+    passages = list(iter_corpus())
+    build_index(passages, tmp_path, spec, factory="Flat", chunk_size=2, log=lambda _: None)
+    # progress.json as written before max_seq_length/passage_prefix were tracked
+    (tmp_path / "progress.json").write_text(json.dumps({"embedder": spec.name, "n": len(passages), "done": 5}))
+    monkeypatch.setattr("kazrag.index.load_embedder", _no_model)
+    build_index(passages, tmp_path, spec, factory="Flat", log=lambda _: None)
+
+
+def test_changed_max_seq_length_reencodes(tiny_models, tmp_path):
+    passages = list(iter_corpus())
+    spec = EmbedderSpec.for_model(tiny_models["embedder"], max_seq_length=128)
+    build_index(passages, tmp_path, spec, factory="Flat", chunk_size=2, log=lambda _: None)
+    logs = []
+    build_index(passages, tmp_path, replace(spec, max_seq_length=64), factory="Flat", chunk_size=2, log=logs.append)
+    assert any(m.startswith("encoded 2/5") for m in logs)
+
+
+def test_ivf_search_params_are_applied(tiny_models, tmp_path):
+    spec = EmbedderSpec.for_model(tiny_models["embedder"], max_seq_length=128)
+    build_index(list(iter_corpus()), tmp_path, spec, factory="IVF2,Flat", log=lambda _: None)
+    assert json.loads((tmp_path / "meta.json").read_text())["search_params"] == "nprobe=64"
+    retriever = DenseRetriever(tmp_path)
+    assert faiss.extract_index_ivf(retriever.index).nprobe == 64
+    assert len(retriever.search(["Астана"], k=3)[0]) == 3
+
+
+def test_multi_device_pool_matches_single_device(tiny_models, tmp_path):
+    spec = EmbedderSpec.for_model(tiny_models["embedder"], max_seq_length=128)
+    passages = list(iter_corpus())
+    single = build_index(passages, tmp_path / "one", spec, factory="Flat", log=lambda _: None)
+    multi = build_index(passages, tmp_path / "two", spec, factory="Flat", devices=["cpu", "cpu"], log=lambda _: None)
+    a = np.load(single / "embeddings.npy")
+    b = np.load(multi / "embeddings.npy")
+    np.testing.assert_allclose(a.astype(np.float32), b.astype(np.float32), atol=1e-2)
