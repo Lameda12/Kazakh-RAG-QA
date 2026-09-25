@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from kazrag.device import default_device
+
 DEFAULT_READER = "deepset/xlm-roberta-large-squad2"
 
 
@@ -71,7 +73,7 @@ class ExtractiveReader:
         from transformers import AutoModelForQuestionAnswering, AutoTokenizer
 
         self.torch = torch
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or default_device()
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if not self.tokenizer.is_fast:
             raise RuntimeError(f"{model_name} needs a fast tokenizer for offset mapping")
