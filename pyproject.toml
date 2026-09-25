@@ -13,3 +13,4 @@ ignore = ["RUF001", "RUF002", "RUF003"]  # Cyrillic text is intentional
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]

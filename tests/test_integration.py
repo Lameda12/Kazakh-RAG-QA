@@ -2,6 +2,7 @@
 
 import importlib
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -58,7 +59,7 @@ def test_pipeline_answer(index_dir, tiny_models):
 
 
 def test_eval_script(index_dir, tiny_models, tmp_path, monkeypatch, capsys):
-    sys.path.insert(0, "scripts")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     eval_script = importlib.import_module("eval")
     out = tmp_path / "res.json"
     monkeypatch.setattr(
