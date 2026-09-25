@@ -1,116 +1,124 @@
-import gradio as gr
-import numpy as np
-from datasets import load_dataset
-from sentence_transformers import SentenceTransformer
-import faiss
+"""Gradio front end for Kazakh open-domain QA.
+
+Configuration (environment variables):
+    INDEX_REPO    HF dataset repo with a prebuilt index (see scripts/build_index.py)
+    INDEX_DIR     local index directory (default: index/)
+    READER_MODEL  extractive QA model (default: deepset/xlm-roberta-large-squad2)
+
+With neither index available, the app builds a small demo index over the ~4.5k
+KazQAD passages that have annotated answers. That is slow on CPU and only
+covers the dataset's own questions; publish a full index for real use.
+"""
+
+from __future__ import annotations
+
+import html
 import os
-import torch
-from transformers import AutoModelForQuestionAnswering, AutoTokenizer
+from pathlib import Path
 
-# ── Load everything at startup ──────────────────────────────
-HF_TOKEN = os.environ.get("HF_TOKEN")
+import gradio as gr
 
-print("Loading KazQAD...")
-dataset = load_dataset("issai/kazqad", "kazqad", token=HF_TOKEN)
+from kazrag.data import reading_comprehension_passages
+from kazrag.index import DEFAULT_EMBEDDER, DenseRetriever, EmbedderSpec, build_index, resolve_index_dir
+from kazrag.pipeline import Answer, KazakhQA
+from kazrag.reader import DEFAULT_READER, ExtractiveReader
 
-all_passages = []
-for split in ["train", "validation", "test"]:
-    for item in dataset[split]:
-        all_passages.append(item["context"])
+LOW_CONFIDENCE = 0.5
+DEMO_INDEX_DIR = Path("index-demo")
 
-unique_passages = list(dict.fromkeys(all_passages))[:500]
-print(f"Corpus: {len(unique_passages):,} passages")
 
-print("Loading KazEmbed-v5...")
-embedder = SentenceTransformer("Nurlykhan/kazembed-v5")
+def load_index() -> tuple[Path, bool]:
+    if repo := os.environ.get("INDEX_REPO"):
+        return resolve_index_dir(repo), False
+    local = Path(os.environ.get("INDEX_DIR", "index"))
+    if (local / "meta.json").exists():
+        return local, False
+    if not (DEMO_INDEX_DIR / "meta.json").exists():
+        print("No prebuilt index found; building the demo index over KazQAD answer passages...")
+        build_index(
+            reading_comprehension_passages(),
+            DEMO_INDEX_DIR,
+            EmbedderSpec.for_model(DEFAULT_EMBEDDER),
+            corpus_name="kazqad-v1.0-rc",
+        )
+    return DEMO_INDEX_DIR, True
 
-print("Encoding corpus...")
-corpus_embeddings = embedder.encode(
-    [f"passage: {p}" for p in unique_passages],
-    batch_size=32,
-    normalize_embeddings=True,
-    show_progress_bar=True,
-    convert_to_numpy=True
-).astype(np.float32)
 
-index = faiss.IndexFlatIP(corpus_embeddings.shape[1])
-index.add(corpus_embeddings)
-print(f"FAISS index built: {index.ntotal:,} vectors")
+index_dir, demo_mode = load_index()
+retriever = DenseRetriever(index_dir)
+reader = ExtractiveReader(os.environ.get("READER_MODEL", DEFAULT_READER))
+qa = KazakhQA(retriever, reader)
+print(f"Ready: {len(retriever):,} passages, embedder={retriever.spec.name}, reader={reader.model_name}")
 
-print("Loading QA reader...")
-qa_tokenizer = AutoTokenizer.from_pretrained("deepset/roberta-base-squad2")
-qa_model = AutoModelForQuestionAnswering.from_pretrained("deepset/roberta-base-squad2")
-qa_model.eval()
-print("✅ Ready!")
 
-# ── RAG pipeline ─────────────────────────────────────────────
-def kazakh_rag_qa(question, top_k=5):
+def render_answer(ans: Answer) -> str:
+    if not ans.found:
+        return "**Жауап табылмады.** Сұрақты басқаша қойып көріңіз."
+    flag = " · ⚠️ сенімділігі төмен" if ans.confidence < LOW_CONFIDENCE else ""
+    return (
+        f"### {ans.text}\n\n"
+        f"Сенімділік: **{ans.confidence:.0%}**{flag} · Дереккөз: #{ans.passage.rank} *{ans.passage.title}*"
+    )
+
+
+def render_passages(ans: Answer) -> str:
+    cards = []
+    for h in ans.hits:
+        content = h.content
+        if ans.passage and h.docid == ans.passage.docid and ans.span:
+            s, e = ans.span.start_char, ans.span.end_char
+            body = f"{html.escape(content[:s])}<mark>{html.escape(content[s:e])}</mark>{html.escape(content[e:])}"
+        else:
+            body = html.escape(content)
+        cards.append(
+            f"<details {'open' if h.rank == 1 or (ans.passage and h.docid == ans.passage.docid) else ''}>"
+            f"<summary><b>{h.rank}. {html.escape(h.title)}</b> · ұқсастық {h.score:.3f} · "
+            f"<code>{h.docid}</code></summary>"
+            f"<p>{body}</p></details>"
+        )
+    return "\n".join(cards)
+
+
+def ask(question: str, top_k: int) -> tuple[str, str]:
     if not question.strip():
         return "Сұрақ енгізіңіз.", ""
+    try:
+        ans = qa.answer(question, top_k=int(top_k))
+    except Exception as exc:  # surface model/index failures in the UI instead of a blank output
+        raise gr.Error(f"Қате: {exc}") from exc
+    return render_answer(ans), render_passages(ans)
 
-    query_emb = embedder.encode(
-        [f"query: {question}"],
-        normalize_embeddings=True,
-        convert_to_numpy=True
-    ).astype(np.float32)
 
-    scores, indices = index.search(query_emb, int(top_k))
-    passages = [
-        {"passage": unique_passages[idx], "score": float(score)}
-        for score, idx in zip(scores[0], indices[0]) if idx >= 0
-    ]
+corpus_note = (
+    f"⚠️ Демо режимі: тек {len(retriever):,} KazQAD үзіндісі индекстелген."
+    if demo_mode
+    else f"{len(retriever):,} Қазақша Википедия үзіндісі"
+)
 
-    candidates = []
-    for p in passages:
-        inputs = qa_tokenizer(
-            question, p["passage"],
-            return_tensors="pt", truncation=True, max_length=512
-        )
-        with torch.no_grad():
-            outputs = qa_model(**inputs)
-        start = outputs.start_logits.argmax()
-        end = outputs.end_logits.argmax() + 1
-        tokens = inputs["input_ids"][0][start:end]
-        answer = qa_tokenizer.decode(tokens, skip_special_tokens=True)
-        score = float(outputs.start_logits.max() + outputs.end_logits.max())
-        candidates.append({
-            "answer": answer,
-            "answer_score": score,
-            "combined_score": score * p["score"],
-            "passage": p["passage"],
-            "retrieval_score": p["score"]
-        })
-
-    candidates.sort(key=lambda x: x["combined_score"], reverse=True)
-    best = candidates[0]
-
-    answer_md = f"**Жауап:** {best['answer']}\n\n*Сенімділік: {best['answer_score']:.1f} | Ұқсастық: {best['retrieval_score']:.3f}*"
-    passages_md = ""
-    for i, p in enumerate(passages, 1):
-        passages_md += f"**{i}.** (score: {p['score']:.3f})\n{p['passage'][:400]}...\n\n---\n\n"
-
-    return answer_md, passages_md
-
-# ── Gradio UI ────────────────────────────────────────────────
-with gr.Blocks(title="🇰🇿 Kazakh RAG QA", theme=gr.themes.Soft(primary_hue="teal")) as demo:
+with gr.Blocks(title="Kazakh RAG QA") as demo:
     gr.Markdown(
-        "# 🇰🇿 Қазақша RAG Сұрақ-Жауап Жүйесі\n"
-        "`kazembed-v5` · `FAISS` · `xlm-roberta` · `KazQAD (ISSAI)`"
+        "# 🇰🇿 Қазақша Сұрақ-Жауап Жүйесі\n"
+        f"`{retriever.spec.name}` → `FAISS` → `{reader.model_name}` · {corpus_note} · "
+        "[KazQAD (ISSAI)](https://github.com/IS2AI/KazQAD)"
     )
     with gr.Row():
-        q_input = gr.Textbox(label="Сұрақ (қазақша)", placeholder="Қазақстан туралы сұрақ...", lines=2)
-        topk = gr.Slider(1, 10, value=5, step=1, label="Top-K үзінділер")
+        q_input = gr.Textbox(label="Сұрақ (қазақша)", placeholder="Қазақстан туралы сұрақ...", lines=2, scale=4)
+        topk = gr.Slider(1, 20, value=5, step=1, label="Оқылатын үзінділер (top-k)", scale=1)
     btn = gr.Button("Іздеу 🔍", variant="primary")
-    answer_out = gr.Markdown(label="Жауап")
-    passages_out = gr.Markdown(label="Үзінділер")
+    answer_out = gr.Markdown()
+    passages_out = gr.HTML()
 
-    gr.Examples([
-        ["Қазақстанның астанасы қай қала?", 3],
-        ["Қазақстан қай жылы тәуелсіздік алды?", 3],
-        ["Байқоңыр ғарыш айлағы қай елде?", 3],
-    ], inputs=[q_input, topk])
+    gr.Examples(
+        [
+            ["Бауыр өзегі қандай бөлікке ашылады?", 5],
+            ["Қазақстанның астанасы қай қала?", 5],
+            ["Байқоңыр ғарыш айлағы қай елде?", 5],
+        ],
+        inputs=[q_input, topk],
+    )
 
-    btn.click(kazakh_rag_qa, [q_input, topk], [answer_out, passages_out])
-    q_input.submit(kazakh_rag_qa, [q_input, topk], [answer_out, passages_out])
+    btn.click(ask, [q_input, topk], [answer_out, passages_out])
+    q_input.submit(ask, [q_input, topk], [answer_out, passages_out])
 
-demo.launch()
+if __name__ == "__main__":
+    demo.launch(theme=gr.themes.Soft(primary_hue="teal"))

@@ -1,9 +1,13 @@
-sentence-transformers
-faiss-cpu
-datasets
-transformers
-gradio
-accelerate
-numpy
-tokenizers
-tiktoken
+# Tested together on Python 3.11. gradio is also pinned by sdk_version on HF Spaces.
+torch>=2.6,<3
+transformers==5.17.0
+sentence-transformers==6.1.0
+tokenizers==0.23.2
+huggingface_hub==1.33.0
+faiss-cpu==1.15.1
+pyarrow==25.0.1
+numpy==2.4.6
+# deepset/xlm-roberta-*-squad2 ship only sentencepiece.bpe.model; the fast tokenizer is converted from it
+sentencepiece==0.2.2
+protobuf==7.36.2
+gradio>=6.0,<7
