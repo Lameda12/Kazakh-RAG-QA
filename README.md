@@ -40,11 +40,17 @@ python scripts/eval.py --index index/ --tasks all            # full test split
 python scripts/eval.py --index index/ --tasks odqa --limit 200 --predictions results/odqa.jsonl
 ```
 
+Results on the KazQAD test split, zero-shot (no Kazakh fine-tuning): `BAAI/bge-m3` retrieval over all 823,889 passages (`SQfp16` index) and `deepset/xlm-roberta-large-squad2` reading the top 5 passages.
+
 | Task | Metric | KazQAD paper baseline | This repo |
 |---|---|---|---|
-| Retrieval | nDCG@10 / MRR | 0.389 / 0.382 | run `--tasks retrieval` |
-| Reading comprehension (gold passage) | EM / F1 | 38.5 / 54.2 | run `--tasks reader` |
-| Open-domain QA | EM / F1 | 17.8 / 28.7 | run `--tasks odqa` |
+| Retrieval (1,929 queries) | nDCG@10 / MRR | 0.389 / 0.382 | 0.368 / 0.344 (MRR@10) |
+| Reading comprehension, gold passage (2,713) | EM / F1 | 38.5 / 54.2 | 37.6 / 53.7 |
+| Open-domain QA (1,927 questions) | EM / F1 | 17.8 / 28.7 | **22.3 / 35.6** |
+
+Retrieval hit rate (a relevant passage in the top k): 23.5% @1, 50.0% @5, 60.1% @10, 68.4% @20, 83.4% @100.
+
+Error breakdown of the open-domain run (`scripts/error_analysis.py`): 22.3% correct, 24.9% partial match (mostly Kazakh case suffixes and span boundaries), 34.9% retrieval miss, 17.9% reader miss. In 249 of the 345 reader misses a gold passage was retrieved but the answer came from a different passage. Answers with confidence below 0.5 are almost always wrong (EM 3.2% over 289 questions), which is where the app shows its low-confidence warning.
 
 Results are written to `results/<split>-<time>.json`, and a markdown table is printed to stdout.
 
