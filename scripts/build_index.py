@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kazrag.data import iter_corpus, reading_comprehension_passages
-from kazrag.index import DEFAULT_EMBEDDER, DEFAULT_FACTORY, PUBLISHED_FILES, EmbedderSpec, build_index
+from kazrag.index import DEFAULT_EMBEDDER, DEFAULT_FACTORY, PUBLISHED_FILES, EmbedderSpec, build_index, load_embedder
 
 CARD = """---
 license: cc-by-sa-4.0
@@ -57,6 +57,7 @@ def main() -> int:
     ap.add_argument("--passage-prefix", help="override the passage prefix (default: inferred from --embedder)")
     ap.add_argument("--max-seq-length", type=int, default=512)
     ap.add_argument("--batch-size", type=int, default=64)
+    ap.add_argument("--device", help="cuda, mps or cpu (default: best available)")
     ap.add_argument("--push-to", metavar="REPO_ID", help="upload the index to this Hugging Face dataset repo")
     ap.add_argument("--private", action="store_true", help="create the pushed repo as private")
     args = ap.parse_args()
@@ -78,6 +79,8 @@ def main() -> int:
             query_prefix=spec.query_prefix if args.query_prefix is None else args.query_prefix,
             passage_prefix=spec.passage_prefix if args.passage_prefix is None else args.passage_prefix,
         )
+    model = load_embedder(spec, args.device)
+    print(f"encoding on {model.device}", file=sys.stderr)
     out = build_index(
         passages,
         args.out,
@@ -85,6 +88,7 @@ def main() -> int:
         factory=args.factory,
         batch_size=args.batch_size,
         corpus_name=corpus_name,
+        model=model,
         log=lambda msg: print(msg, file=sys.stderr),
     )
 

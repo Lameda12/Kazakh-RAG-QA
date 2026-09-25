@@ -22,6 +22,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from kazrag.data import Passage
+from kazrag.device import default_device
 
 DEFAULT_EMBEDDER = "BAAI/bge-m3"
 DEFAULT_FACTORY = "SQfp16"  # exact inner-product scan at half the memory of Flat
@@ -61,8 +62,8 @@ def load_embedder(spec: EmbedderSpec, device: str | None = None):
     import torch
     from sentence_transformers import SentenceTransformer
 
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    model_kwargs = {"dtype": torch.float16} if device.startswith("cuda") else {}
+    device = device or default_device()
+    model_kwargs = {"dtype": torch.float16} if device.startswith(("cuda", "mps")) else {}
     model = SentenceTransformer(spec.name, device=device, model_kwargs=model_kwargs)
     # bge-m3 defaults to 8192 tokens; KazQAD passages are short (p95 ~970 chars).
     model.max_seq_length = spec.max_seq_length
