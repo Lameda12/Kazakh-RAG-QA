@@ -1,0 +1,15 @@
+[project]
+name = "kazakh-rag-qa"
+version = "0.2.0"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # Cyrillic text is intentional
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
