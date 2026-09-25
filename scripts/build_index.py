@@ -8,6 +8,18 @@ point the app at it with INDEX_REPO:
     python scripts/build_index.py --out index/ --push-to <user>/kazqad-bge-m3-index
 
 Re-running with the same arguments resumes an interrupted encoding run.
+
+Index size for 823,889 bge-m3 vectors (1024 dims), by --factory. Once encoding
+is done, re-running with another --factory rebuilds the index in minutes
+without re-encoding, so compare them with `scripts/eval.py --tasks retrieval`:
+
+    SQfp16          ~1.7 GB   exact scan, default
+    SQ8             ~0.84 GB  8-bit scalar quantization
+    SQ4             ~0.42 GB  4-bit
+    IVF4096,PQ128   ~0.13 GB  approximate; searched with nprobe=64
+
+Speed: --devices cuda:0 cuda:1 on Kaggle's 2x T4; --max-seq-length 256 cuts
+the long tail (KazQAD passages have a median of 180 chars) but restarts encoding.
 """
 
 from __future__ import annotations
@@ -20,7 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kazrag.data import iter_corpus, reading_comprehension_passages
-from kazrag.index import DEFAULT_EMBEDDER, DEFAULT_FACTORY, PUBLISHED_FILES, EmbedderSpec, build_index, load_embedder
+from kazrag.index import DEFAULT_EMBEDDER, DEFAULT_FACTORY, PUBLISHED_FILES, EmbedderSpec, build_index
 
 CARD = """---
 license: cc-by-sa-4.0
@@ -58,6 +70,8 @@ def main() -> int:
     ap.add_argument("--max-seq-length", type=int, default=512)
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--device", help="cuda, mps or cpu (default: best available)")
+    ap.add_argument("--devices", nargs="+", help="encode on several GPUs at once, e.g. --devices cuda:0 cuda:1")
+    ap.add_argument("--search-params", help="faiss query-time params, e.g. nprobe=64 (default: set from --factory)")
     ap.add_argument("--push-to", metavar="REPO_ID", help="upload the index to this Hugging Face dataset repo")
     ap.add_argument("--private", action="store_true", help="create the pushed repo as private")
     args = ap.parse_args()
@@ -79,16 +93,16 @@ def main() -> int:
             query_prefix=spec.query_prefix if args.query_prefix is None else args.query_prefix,
             passage_prefix=spec.passage_prefix if args.passage_prefix is None else args.passage_prefix,
         )
-    model = load_embedder(spec, args.device)
-    print(f"encoding on {model.device}", file=sys.stderr)
     out = build_index(
         passages,
         args.out,
         spec,
         factory=args.factory,
+        search_params=args.search_params,
         batch_size=args.batch_size,
         corpus_name=corpus_name,
-        model=model,
+        device=args.device,
+        devices=args.devices,
         log=lambda msg: print(msg, file=sys.stderr),
     )
 

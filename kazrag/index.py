@@ -70,14 +70,25 @@ def load_embedder(spec: EmbedderSpec, device: str | None = None):
     return model
 
 
-def encode(model, texts: Sequence[str], prefix: str, batch_size: int = 32) -> np.ndarray:
+def encode(model, texts: Sequence[str], prefix: str, batch_size: int = 32, pool=None) -> np.ndarray:
     return model.encode(
         [prefix + t for t in texts],
         batch_size=batch_size,
         normalize_embeddings=True,
         convert_to_numpy=True,
         show_progress_bar=False,
+        pool=pool,
     ).astype(np.float32)
+
+
+def default_search_params(factory: str) -> str:
+    """Query-time knobs for approximate indexes; faiss defaults (nprobe=1) wreck recall."""
+    params = []
+    if "IVF" in factory:
+        params.append("nprobe=64")
+    if "HNSW" in factory:
+        params.append("efSearch=128")
+    return ",".join(params)
 
 
 def build_index(
@@ -86,16 +97,22 @@ def build_index(
     spec: EmbedderSpec,
     *,
     factory: str = DEFAULT_FACTORY,
+    search_params: str | None = None,
     batch_size: int = 32,
     chunk_size: int = 20_000,
     corpus_name: str = "kazqad-v1.0",
     model=None,
+    device: str | None = None,
+    devices: Sequence[str] | None = None,
     log=print,
 ) -> Path:
     """Encode passages and write a self-describing index directory.
 
     Encoding is checkpointed per chunk into embeddings.npy, so an interrupted
     Colab/Kaggle run resumes where it stopped when re-run with the same args.
+    Once encoding is complete, re-running with a different `factory` only
+    rebuilds the faiss index from embeddings.npy: no model is loaded.
+    `devices` (e.g. ["cuda:0", "cuda:1"]) encodes on several GPUs at once.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     n = len(passages)
@@ -103,30 +120,49 @@ def build_index(
         raise ValueError("no passages to index")
 
     _write_passages(passages, out_dir / "passages.parquet")
-    model = model or load_embedder(spec)
-    dim = (getattr(model, "get_embedding_dimension", None) or model.get_sentence_embedding_dimension)()
-
     emb_path, progress_path = out_dir / "embeddings.npy", out_dir / "progress.json"
-    progress = _read_progress(progress_path, spec.name, n)
-    mode = "r+" if progress["done"] and emb_path.exists() else "w+"
-    emb = np.lib.format.open_memmap(emb_path, mode=mode, dtype=np.float16, shape=(n, dim))
+    progress = _read_progress(progress_path, spec, n)
+
+    emb = None
+    if progress["done"] and emb_path.exists():
+        emb = np.lib.format.open_memmap(emb_path, mode="r+")
+        if emb.shape[0] != n:
+            emb, progress = None, _read_progress(None, spec, n)
+    if emb is None:
+        model = model or load_embedder(spec, device)
+        dim = (getattr(model, "get_embedding_dimension", None) or model.get_sentence_embedding_dimension)()
+        emb = np.lib.format.open_memmap(emb_path, mode="w+", dtype=np.float16, shape=(n, dim))
+    dim = emb.shape[1]
 
     start = progress["done"]
-    if start:
-        log(f"resuming encoding at {start:,}/{n:,}")
-    t0 = time.perf_counter()
-    for lo in range(start, n, chunk_size):
-        hi = min(lo + chunk_size, n)
-        emb[lo:hi] = encode(model, [p.content for p in passages[lo:hi]], spec.passage_prefix, batch_size)
-        emb.flush()
-        progress["done"] = hi
-        progress_path.write_text(json.dumps(progress))
-        rate = (hi - start) / (time.perf_counter() - t0)
-        log(f"encoded {hi:,}/{n:,} ({rate:.0f} passages/s, eta {(n - hi) / rate / 60:.1f} min)")
+    if start < n:
+        model = model or load_embedder(spec, device)
+        pool = model.start_multi_process_pool(list(devices)) if devices and len(devices) > 1 else None
+        log(
+            f"encoding on {', '.join(devices) if pool else model.device}"
+            + (f", resuming at {start:,}/{n:,}" if start else "")
+        )
+        try:
+            t0 = time.perf_counter()
+            for lo in range(start, n, chunk_size):
+                hi = min(lo + chunk_size, n)
+                texts = [p.content for p in passages[lo:hi]]
+                emb[lo:hi] = encode(model, texts, spec.passage_prefix, batch_size, pool)
+                emb.flush()
+                progress["done"] = hi
+                progress_path.write_text(json.dumps(progress))
+                rate = (hi - start) / (time.perf_counter() - t0)
+                log(f"encoded {hi:,}/{n:,} ({rate:.0f} passages/s, eta {(n - hi) / rate / 60:.1f} min)")
+        finally:
+            if pool is not None:
+                model.stop_multi_process_pool(pool)
+    else:
+        log(f"all {n:,} passages already encoded; rebuilding the {factory} index from embeddings.npy")
 
     index = faiss.index_factory(dim, factory, faiss.METRIC_INNER_PRODUCT)
     if not index.is_trained:
-        sample = np.random.default_rng(0).choice(n, size=min(n, 100_000), replace=False)
+        sample = np.random.default_rng(0).choice(n, size=min(n, 200_000), replace=False)
+        log(f"training {factory} on {len(sample):,} vectors")
         index.train(np.asarray(emb[np.sort(sample)], dtype=np.float32))
     for lo in range(0, n, chunk_size):
         index.add(np.asarray(emb[lo : lo + chunk_size], dtype=np.float32))
@@ -139,11 +175,13 @@ def build_index(
         "max_seq_length": spec.max_seq_length,
         "dim": dim,
         "faiss_factory": factory,
+        "search_params": default_search_params(factory) if search_params is None else search_params,
         "n_passages": n,
         "corpus": corpus_name,
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
-    log(f"index written to {out_dir} ({index.ntotal:,} vectors, {factory})")
+    size_mb = (out_dir / "index.faiss").stat().st_size / 1e6
+    log(f"index written to {out_dir} ({index.ntotal:,} vectors, {factory}, {size_mb:,.0f} MB)")
     return out_dir
 
 
@@ -158,14 +196,17 @@ def _write_passages(passages: Sequence[Passage], path: Path) -> None:
     pq.write_table(table, path, compression="zstd")
 
 
-def _read_progress(path: Path, embedder: str, n: int) -> dict:
-    fresh = {"embedder": embedder, "n": n, "done": 0}
-    if not path.exists():
+def _read_progress(path: Path | None, spec: EmbedderSpec, n: int) -> dict:
+    key = {"embedder": spec.name, "n": n, "max_seq_length": spec.max_seq_length, "passage_prefix": spec.passage_prefix}
+    fresh = {**key, "done": 0}
+    if path is None or not path.exists():
         return fresh
     progress = json.loads(path.read_text())
-    if progress.get("embedder") != embedder or progress.get("n") != n:
-        return fresh  # different corpus or model: start over
-    return progress
+    # Anything that changes the vectors invalidates them. Keys missing from an
+    # older progress.json are treated as matching so existing runs still resume.
+    if any(progress.get(k, v) != v for k, v in key.items()):
+        return fresh
+    return {**progress, **key}
 
 
 def resolve_index_dir(location: str) -> Path:
@@ -190,6 +231,8 @@ class DenseRetriever:
             self.meta["max_seq_length"],
         )
         self.index = faiss.read_index(str(index_dir / "index.faiss"))
+        if params := self.meta.get("search_params", default_search_params(self.meta.get("faiss_factory", ""))):
+            faiss.ParameterSpace().set_index_parameters(self.index, params)
         self.passages = pq.read_table(index_dir / "passages.parquet")
         if self.index.ntotal != self.passages.num_rows:
             raise ValueError(
