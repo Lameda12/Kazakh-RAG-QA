@@ -53,6 +53,19 @@ def kazqad_root(tmp_path_factory):
             )
         path = root / f"reading-comprehension/kazqad-reading-comprehension-v1.0-kk-{split}.jsonl"
         path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rc), encoding="utf-8")
+    nq_dir = root / "supplementary" / "nq-translate-kk"
+    nq_dir.mkdir(parents=True)
+    with gzip.open(nq_dir / "nq-reading-comprehension-translate-kk.jsonl.gz", "wt", encoding="utf-8") as fh:
+        for i, (_, title, text) in enumerate(PASSAGES[:5]):
+            answer = text.split()[0]
+            row = {
+                "id": f"nq{i}",
+                "title": title,
+                "context": text,
+                "question": f"{title} деген не?",
+                "answers": {"text": [answer], "answer_start": [0]},
+            }
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     return root
 
 
@@ -70,7 +83,7 @@ def tiny_models(tmp_path_factory):
     torch = pytest.importorskip("torch")
     from sentence_transformers import SentenceTransformer
     from sentence_transformers.sentence_transformer.modules import Pooling, Transformer
-    from tokenizers import Tokenizer, models, normalizers, pre_tokenizers, processors, trainers
+    from tokenizers import Tokenizer, decoders, models, normalizers, pre_tokenizers, processors, trainers
     from transformers import (
         AutoModelForQuestionAnswering,
         PreTrainedTokenizerFast,
@@ -84,6 +97,7 @@ def tiny_models(tmp_path_factory):
     tok = Tokenizer(models.Unigram())
     tok.normalizer = normalizers.NFKC()
     tok.pre_tokenizer = pre_tokenizers.Metaspace()
+    tok.decoder = decoders.Metaspace()
     corpus = [x for _, t, x in PASSAGES] + [q for q, _, _ in QUESTIONS.values()]
     tok.train_from_iterator(corpus, trainers.UnigramTrainer(vocab_size=300, special_tokens=specials, unk_token="<unk>"))
     tok.post_processor = processors.RobertaProcessing(

@@ -155,6 +155,17 @@ def load_reading_comprehension(split: Split) -> list[dict]:
         return [json.loads(line) for line in fh if line.strip()]
 
 
+def load_nq_translated() -> list[dict]:
+    """~61.6k Natural Questions items machine-translated into Kazakh (KazQAD supplementary, training only).
+
+    Same SQuAD-style schema as the reading-comprehension files; answer offsets
+    are character-exact and no question overlaps the validation or test splits.
+    """
+    path = resolve("supplementary/nq-translate-kk/nq-reading-comprehension-translate-kk.jsonl.gz")
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
 def load_questions(split: Split) -> list[QAExample]:
     """Group reading-comprehension rows by question for open-domain evaluation."""
     by_qid: dict[str, QAExample] = {}

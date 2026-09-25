@@ -48,6 +48,15 @@ python scripts/eval.py --index index/ --tasks odqa --limit 200 --predictions res
 
 Results are written to `results/<split>-<time>.json`, and a markdown table is printed to stdout.
 
+## Fine-tuning the reader
+
+`scripts/train_reader.py` fine-tunes `deepset/xlm-roberta-base-squad2` on KazQAD train plus ~61.6k machine-translated NQ items, one run per seed, then averages the runs into a [model soup](https://arxiv.org/abs/2203.05482) (uniform and greedy). Whichever of the base model, each run and the soups scores best on KazQAD validation is saved to `<out>/final`. Runs resume after a disconnect when `--out` is on Google Drive.
+
+```bash
+python scripts/train_reader.py --out /content/drive/MyDrive/reader-runs
+python scripts/eval.py --tasks reader --reader /content/drive/MyDrive/reader-runs/final
+```
+
 ## Development
 
 ```bash
