@@ -10,4 +10,6 @@ numpy==2.4.6
 # deepset/xlm-roberta-*-squad2 ship only sentencepiece.bpe.model; the fast tokenizer is converted from it
 sentencepiece==0.2.2
 protobuf==7.36.2
+# training only (scripts/train_reader.py)
+accelerate==1.15.0
 gradio>=6.0,<7

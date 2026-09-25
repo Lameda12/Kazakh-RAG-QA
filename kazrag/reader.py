@@ -141,10 +141,14 @@ class ExtractiveReader:
         ]
 
     def _clip_question(self, question: str) -> str:
-        """only_second truncation cannot shorten the question, so cap it here (SQuAD-style max_query_length).
+        return clip_question(self.tokenizer, question, self.max_length)
 
-        A third of the window keeps room for the context plus the stride overlap.
-        """
-        max_tokens = min(64, self.max_length // 3)
-        ids = self.tokenizer(question, add_special_tokens=False)["input_ids"]
-        return question if len(ids) <= max_tokens else self.tokenizer.decode(ids[:max_tokens])
+
+def clip_question(tokenizer, question: str, max_length: int) -> str:
+    """only_second truncation cannot shorten the question, so cap it here (SQuAD-style max_query_length).
+
+    A third of the window keeps room for the context plus the stride overlap.
+    """
+    max_tokens = min(64, max_length // 3)
+    ids = tokenizer(question, add_special_tokens=False)["input_ids"]
+    return question if len(ids) <= max_tokens else tokenizer.decode(ids[:max_tokens])

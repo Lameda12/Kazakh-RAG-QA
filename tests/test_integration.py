@@ -91,6 +91,11 @@ def test_eval_script(index_dir, tiny_models, tmp_path, monkeypatch, capsys):
     assert len((tmp_path / "p.jsonl").read_text().splitlines()) == 9
     assert "**odqa**" in capsys.readouterr().out
 
+    error_analysis = importlib.import_module("error_analysis")
+    records = error_analysis.load_records(tmp_path / "p.jsonl", "test")
+    assert len(records) == 3 and all(r["gold_docs"] for r in records)
+    assert error_analysis.analyze(records)["n"] == 3
+
 
 def test_app_ask(index_dir, tiny_models, monkeypatch):
     monkeypatch.delenv("INDEX_REPO", raising=False)

@@ -107,6 +107,7 @@ def eval_odqa(qa: KazakhQA, split: str, top_k: int, limit: int, predictions: lis
                 "golds": ex.answers,
                 "source": ans.passage.docid if ans.passage else None,
                 "retrieved": [h.docid for h in ans.hits],
+                "gold_docs": sorted(gold_docs),
             }
         )
         if i % 50 == 0 or i == len(questions):
